@@ -631,8 +631,16 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
         // Now that the service is connected and sessions exist, populate the session chips.
         updateSessionTabs();
 
-        // Ensure zsh plugins + shell are set up for existing installs that skipped first-run.
-        new Thread(() -> TermuxInstaller.installZshPlugins(this)).start();
+        // Re-ensure zsh files when the user opted in; installer skips foreign files.
+        if (NewTermuxSettings.isZshSetupDone(this)) {
+            new Thread(() -> {
+                int res = TermuxInstaller.installZshPlugins(this);
+                if (res != TermuxInstaller.ZSH_SETUP_OK) {
+                    Logger.logDebug(LOG_TAG, "Background zsh re-ensure: " + res);
+                }
+                TermuxInstaller.repairDanglingShellLink();
+            }).start();
+        }
 
         // Request storage permission on every launch; no-op if already granted.
         // Demo build: skip entirely — demo has no real filesystem, setupStorageSymlinks
