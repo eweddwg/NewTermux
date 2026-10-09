@@ -42,12 +42,17 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.LocalLifecycleOwner
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -82,6 +87,7 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * NewTermux settings, fully rewritten in Jetpack Compose (Phase 5), replacing
@@ -293,8 +299,15 @@ private fun FeaturesScreen(activity: Activity, onBack: () -> Unit) {
     val context = LocalContext.current
     var showScriptEditor by remember { mutableStateOf(false) }
     var showRestartWarning by remember { mutableStateOf(false) }
+    var featSeq by remember { mutableStateOf(0) }
+    val featOwner = LocalLifecycleOwner.current
+    DisposableEffect(featOwner) {
+        val obs = LifecycleEventObserver { _, event -> if (event == Lifecycle.Event.ON_RESUME) featSeq++ }
+        featOwner.lifecycle.addObserver(obs)
+        onDispose { featOwner.lifecycle.removeObserver(obs) }
+    }
 
-    val zshInstalled = remember { File(TermuxConstants.TERMUX_PREFIX_DIR_PATH, "bin/zsh").exists() }
+    val zshInstalled = remember(featSeq) { File(TermuxConstants.TERMUX_PREFIX_DIR_PATH, "bin/zsh").exists() }
 
     SettingsScaffold("Features", onBack) { mod ->
         Column(modifier = mod) {
@@ -324,12 +337,17 @@ private fun FeaturesScreen(activity: Activity, onBack: () -> Unit) {
             if (zshInstalled) {
                 NavRow("Zsh", "✓ Installed", enabled = false) {}
             } else {
-                NavRow("Install Zsh", "Required for syntax highlighting and autosuggestions") {
-                    NewTermuxSettings.setPendingCommand(context, "pkg install zsh\n")
+                NavRow("Install Zsh", "Required for syntax highlighting and autosuggestions. Sets Zsh as default shell.") {
+                    if (NewTermuxSettings.getPendingCommand(context) != null) {
+                        Toast.makeText(context, "Kept queued command, run it first", Toast.LENGTH_LONG).show()
+                        activity.finish()
+                        return@NavRow
+                    }
+                    NewTermuxSettings.setPendingCommand(context, "mkdir -p ~/.termux && pkg install zsh && ln -sf \$PREFIX/bin/zsh ~/.termux/shell\n")
                     activity.finish()
                 }
             }
-            ZshPluginsSwitch(context, zshInstalled, onChanged = { showRestartWarning = true })
+            ZshSetupRow(activity, context, zshInstalled, onChanged = { showRestartWarning = true })
 
             CategoryHeader("Drawer")
             NtSwitch(context, NewTermuxSettings.KEY_SHOW_DRAWER_EXPORT_SCRIPT, "Export Screen & Make Script", "Show Export Screen and Make Script buttons in the drawer")
@@ -360,19 +378,81 @@ private fun FeaturesScreen(activity: Activity, onBack: () -> Unit) {
     }
 }
 
+private class ZshFs(
+    val zshOk: Boolean,
+    val hasOwnZshrc: Boolean,
+    val omzInRc: Boolean,
+    val omzDir: Boolean,
+    val generatedMarker: Boolean,
+    val stubFix: Boolean,
+    val pluginsGone: Boolean,
+)
+
 @Composable
-private fun ZshPluginsSwitch(context: Context, zshInstalled: Boolean, onChanged: () -> Unit) {
-    var checked by remember { mutableStateOf(NewTermuxSettings.isZshPluginsEnabled(context)) }
-    SwitchRow(
-        title = "Shell Enhancements",
-        summary = if (zshInstalled) "Autosuggestions + syntax highlighting (requires Zsh)" else "Install Zsh first to enable this",
-        checked = checked,
-        enabled = zshInstalled,
-    ) {
-        checked = it
-        NewTermuxSettings.set(context, NewTermuxSettings.KEY_ZSH_PLUGINS, it)
-        Thread { TermuxInstaller.setZshPlugins(context, it) }.start()
-        onChanged()
+private fun ZshSetupRow(activity: Activity, context: Context, zshInstalled: Boolean, onChanged: () -> Unit) {
+    var running by remember { mutableStateOf(false) }
+    var seq by remember { mutableStateOf(0) }
+    val busy = remember { AtomicBoolean(false) }
+    val owner = LocalLifecycleOwner.current
+    DisposableEffect(owner) {
+        val obs = LifecycleEventObserver { _, event -> if (event == Lifecycle.Event.ON_RESUME) seq++ }
+        owner.lifecycle.addObserver(obs)
+        onDispose { owner.lifecycle.removeObserver(obs) }
+    }
+    var fs by remember { mutableStateOf<ZshFs?>(null) }
+    LaunchedEffect(seq) {
+        fs = withContext(Dispatchers.IO) {
+            val home = File(TermuxConstants.TERMUX_HOME_DIR_PATH)
+            val zshrc = File(home, ".zshrc")
+            val pluginsDir = File(home, ".zsh/plugins")
+            val pluginsGone = !pluginsDir.exists()
+            val content = runCatching { if (zshrc.exists()) zshrc.readText().trimStart('\uFEFF', '\n', '\r', ' ', '\t') else null }.getOrNull()
+            ZshFs(
+                zshOk = zshInstalled || File(TermuxConstants.TERMUX_PREFIX_DIR_PATH, "bin/zsh").exists(),
+                hasOwnZshrc = content != null,
+                omzInRc = content?.contains("oh-my-zsh") == true,
+                omzDir = File(home, ".oh-my-zsh").exists(),
+                generatedMarker = content?.startsWith("# Generated by NewTermux") == true,
+                stubFix = TermuxInstaller.isKnownStubZshrc(zshrc)
+                    && (pluginsGone || TermuxInstaller.ourPluginFilesPresent(pluginsDir)),
+                pluginsGone = pluginsGone,
+            )
+        }
+    }
+    val s = fs
+    when {
+        s == null -> NavRow("Setup Zsh", "Checking…", enabled = false) {}
+        !s.zshOk -> NavRow("Setup Zsh", "Install Zsh first to enable this", enabled = false) {}
+        s.omzInRc -> NavRow("Setup Zsh", "Skipped, OMZ .zshrc found", enabled = false) {}
+        !s.stubFix && s.omzDir -> NavRow("Setup Zsh", "Skipped, OMZ install found", enabled = false) {}
+        !s.stubFix && s.generatedMarker -> NavRow("Setup Zsh", "✓ Done, .zshrc is yours now", enabled = false) {}
+        !s.stubFix && s.hasOwnZshrc -> NavRow("Setup Zsh", "Skipped, own .zshrc found", enabled = false) {}
+        !s.stubFix && !s.pluginsGone -> NavRow("Setup Zsh", "Skipped, own plugins found", enabled = false) {}
+        running -> NavRow("Setup Zsh", "Installing…", enabled = false) {}
+        else -> NavRow("Setup Zsh", "Unpack plugins and write .zshrc once") {
+            if (!busy.compareAndSet(false, true)) return@NavRow
+            running = true
+            Thread {
+                try {
+                    val res = TermuxInstaller.installZshPlugins(context)
+                    if (res == TermuxInstaller.ZSH_SETUP_OK) NewTermuxSettings.setZshSetupDone(context, true)
+                    activity.runOnUiThread {
+                        running = false
+                        seq++
+                        when (res) {
+                            TermuxInstaller.ZSH_SETUP_OK -> {
+                                Toast.makeText(context, "Zsh setup done", Toast.LENGTH_SHORT).show()
+                                onChanged()
+                            }
+                            TermuxInstaller.ZSH_SETUP_SKIPPED -> Toast.makeText(context, "Setup skipped, your files kept", Toast.LENGTH_SHORT).show()
+                            else -> Toast.makeText(context, "Zsh setup failed, check logs", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                } finally {
+                    busy.set(false)
+                }
+            }.start()
+        }
     }
 }
 
