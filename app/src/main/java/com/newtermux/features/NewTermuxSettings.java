@@ -13,7 +13,9 @@ public class NewTermuxSettings {
     public static final String KEY_SHOW_STT_BUTTON      = "show_stt_button";
     public static final String KEY_SHOW_PACKAGES_BUTTON = "show_packages_button";
     public static final String KEY_SHOW_CLEAR_BUTTON        = "show_clear_button";
-    public static final String KEY_ZSH_PLUGINS = "zsh_plugins";
+    public static final String KEY_ZSH_SETUP_DONE = "zsh_setup_done";
+    private static final String LEGACY_ZSH_PLUGINS_KEY = "zsh_plugins";
+    private static final String LEGACY_ZSH_PLUGINS_KEY = "zsh_plugins";
     public static final String KEY_SESSION_TABS             = "session_tabs";
     public static final String KEY_AUTOCORRECT               = "autocorrect_enabled";
     public static final String KEY_SHOW_DRAWER_EXPORT_SCRIPT = "show_drawer_export_script";
@@ -55,8 +57,20 @@ public class NewTermuxSettings {
     public static boolean isShowClearButton(Context ctx) {
         return prefs(ctx).getBoolean(KEY_SHOW_CLEAR_BUTTON, true);
     }
-    public static boolean isZshPluginsEnabled(Context ctx) {
-        return prefs(ctx).getBoolean(KEY_ZSH_PLUGINS, false);
+    public static boolean isZshSetupDone(Context ctx) {
+        SharedPreferences prefs = prefs(ctx);
+        if (prefs.contains(LEGACY_ZSH_PLUGINS_KEY)) {
+            boolean migrated = prefs.getBoolean(KEY_ZSH_SETUP_DONE, false) || prefs.getBoolean(LEGACY_ZSH_PLUGINS_KEY, false);
+            SharedPreferences.Editor editor = prefs.edit();
+            editor.putBoolean(KEY_ZSH_SETUP_DONE, migrated);
+            editor.remove(LEGACY_ZSH_PLUGINS_KEY);
+            editor.apply();
+            return migrated;
+        }
+        return prefs.getBoolean(KEY_ZSH_SETUP_DONE, false);
+    }
+    public static void setZshSetupDone(Context ctx, boolean v) {
+        prefs(ctx).edit().putBoolean(KEY_ZSH_SETUP_DONE, v).apply();
     }
     public static boolean isSessionTabsEnabled(Context ctx) {
         return prefs(ctx).getBoolean(KEY_SESSION_TABS, true);
@@ -118,6 +132,7 @@ public class NewTermuxSettings {
 
     // Generic setter for all boolean keys (used by preference listener)
     public static void set(Context ctx, String key, boolean value) {
+        if (LEGACY_ZSH_PLUGINS_KEY.equals(key)) return;
         prefs(ctx).edit().putBoolean(key, value).apply();
     }
 
@@ -130,7 +145,7 @@ public class NewTermuxSettings {
             case KEY_SHOW_STT_BUTTON:      return isShowSttButton(ctx);
             case KEY_SHOW_PACKAGES_BUTTON: return isShowPackagesButton(ctx);
             case KEY_SHOW_CLEAR_BUTTON:    return isShowClearButton(ctx);
-            case KEY_ZSH_PLUGINS:                  return isZshPluginsEnabled(ctx);
+            case KEY_ZSH_SETUP_DONE:               return isZshSetupDone(ctx);
             case KEY_SESSION_TABS:                 return isSessionTabsEnabled(ctx);
             case KEY_AUTOCORRECT:                  return isAutocorrectEnabled(ctx);
             case KEY_SHOW_DRAWER_EXPORT_SCRIPT:    return isShowDrawerExportScript(ctx);
